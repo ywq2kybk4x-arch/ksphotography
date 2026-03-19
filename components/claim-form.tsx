@@ -42,7 +42,10 @@ export function ClaimForm(): React.ReactElement {
       const otpRes = await fetch('/api/auth/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ guestId: claimData.guestId })
+        body: JSON.stringify({
+          guestId: claimData.guestId,
+          email: claimData.contact
+        })
       });
       const otpData = (await otpRes.json()) as { error?: string };
       if (!otpRes.ok) {

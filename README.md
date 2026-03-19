@@ -30,6 +30,8 @@ Required:
 - `APP_SESSION_SECRET`
 - `ADMIN_API_KEY`
 - `CRON_SECRET`
+- `RESEND_API_KEY` (for production OTP email delivery)
+- `OTP_FROM_EMAIL` (for example `KS Photography <noreply@yourdomain.com>`)
 
 ## 2) Supabase Setup
 
@@ -89,7 +91,8 @@ Then open `http://localhost:3000`.
 ## 7) Production Notes
 
 - This project is configured for free-friendly email-only OTP flow (no SMS costs)
-- Replace OTP console logging with a real email sender if needed (for example Resend free tier)
+- OTP now sends through Resend when `RESEND_API_KEY` and `OTP_FROM_EMAIL` are configured
+- In local development, OTP is still logged so you can test quickly
 - Add bot protection (Turnstile/reCAPTCHA) on `/claim` and OTP endpoints
 - Add an admin auth provider (Supabase Auth or SSO) instead of static API key in UI
 - Add image thumbnails/previews for better gallery UX

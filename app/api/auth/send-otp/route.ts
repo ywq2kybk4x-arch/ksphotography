@@ -5,9 +5,13 @@ import { createOtpCode } from '@/lib/otp';
 import { enforceRateLimit } from '@/lib/rate-limit';
 import { getClientIp, jsonError } from '@/lib/http';
 import { writeAuditLog } from '@/lib/audit';
+import { hashValue, normalizeContact } from '@/lib/security';
+import { sendOtpEmail } from '@/lib/email';
+import { getOtpExpiryMinutes } from '@/lib/env';
 
 const schema = z.object({
-  guestId: z.string().uuid()
+  guestId: z.string().uuid(),
+  email: z.string().email()
 });
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -25,7 +29,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const supabase = createAdminClient();
   const { data: guest, error } = await supabase
     .from('guests')
-    .select('id, contact_type, contact_value_masked')
+    .select('id, contact_type, contact_value_masked, contact_value_hash')
     .eq('id', parsed.data.guestId)
     .single();
 
@@ -36,7 +40,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return jsonError('Only email delivery is supported', 422);
   }
 
+  const normalizedEmail = normalizeContact('email', parsed.data.email);
+  const suppliedHash = hashValue(normalizedEmail);
+  if (suppliedHash !== guest.contact_value_hash) {
+    return jsonError('Email does not match this guest claim', 403);
+  }
+
   const code = await createOtpCode(guest.id);
+  const emailResult = await sendOtpEmail({
+    to: normalizedEmail,
+    code,
+    expiryMinutes: getOtpExpiryMinutes()
+  });
+
+  if (!emailResult.ok && process.env.NODE_ENV === 'production') {
+    return jsonError(`Unable to deliver OTP email: ${emailResult.detail}`, 500);
+  }
 
   await writeAuditLog({
     actorType: 'guest',
@@ -50,8 +69,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   return NextResponse.json({
     ok: true,
-    delivery: guest.contact_type,
+    delivery: 'email',
     masked: guest.contact_value_masked,
-    developmentCode: process.env.NODE_ENV === 'production' ? undefined : code
+    developmentCode: process.env.NODE_ENV === 'production' ? undefined : code,
+    emailWarning: emailResult.ok ? undefined : emailResult.detail
   });
 }
