@@ -29,6 +29,7 @@ Required:
 - `SUPABASE_JWT_SECRET`
 - `APP_SESSION_SECRET`
 - `ADMIN_API_KEY`
+- `ADMIN_DASHBOARD_PASSWORD`
 - `CRON_SECRET`
 - `RESEND_API_KEY` (for production OTP email delivery)
 - `OTP_FROM_EMAIL` (for example `KS Photography <noreply@yourdomain.com>`)
@@ -66,8 +67,8 @@ Then open `http://localhost:3000`.
 4. Access private gallery at `/gallery`
 
 - Admin flow:
-1. Open `/admin`
-2. Enter `ADMIN_API_KEY`
+1. Open `/admin/login`
+2. Sign in with `ADMIN_DASHBOARD_PASSWORD` (falls back to `ADMIN_API_KEY` if not set)
 3. Create/activate event
 4. Upload photos (private/public)
 5. Assign private photo IDs to guest IDs
@@ -86,6 +87,7 @@ Then open `http://localhost:3000`.
 - Contact values are hashed for lookup (`contact_value_hash`)
 - Guest read access is constrained by guest-scoped token + RLS
 - Admin APIs require `x-admin-api-key`
+- Admin dashboard is password-protected via secure httpOnly cookie session
 - Download links are short-lived signed URLs
 
 ## 7) Production Notes

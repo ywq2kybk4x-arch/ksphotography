@@ -1,14 +1,18 @@
+import { redirect } from 'next/navigation';
 import { AdminPanel } from '@/components/admin-panel';
+import { hasAdminSessionCookie } from '@/lib/admin-session';
 
-export default function AdminPage(): React.ReactElement {
+export default async function AdminPage(): Promise<React.ReactElement> {
+  const isAuthed = await hasAdminSessionCookie();
+  if (!isAuthed) {
+    redirect('/admin/login');
+  }
+
   return (
     <section className="section">
       <div className="container">
-        <h1>Admin Dashboard</h1>
-        <p className="small">Manage events, uploads, assignments, retention, and Venmo settings.</p>
         <AdminPanel />
       </div>
     </section>
   );
 }
-
