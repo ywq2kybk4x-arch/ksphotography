@@ -18,7 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }):
             <nav className="nav-links">
               <Link href="/portfolio">Portfolio</Link>
               <Link href="/about">About</Link>
-              <Link href="/claim">Get Your Photos</Link>
+              <Link href="/admin">Deliver Photos</Link>
               <Link href="/admin">Admin</Link>
             </nav>
           </div>
@@ -28,4 +28,3 @@ export default function RootLayout({ children }: { children: React.ReactNode }):
     </html>
   );
 }
-

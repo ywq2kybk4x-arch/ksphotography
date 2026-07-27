@@ -10,6 +10,7 @@ const schema = z.object({
   eventId: z.string().uuid(),
   filename: z.string().min(1),
   contentType: z.string().min(3),
+  previewContentType: z.string().min(3).default('image/jpeg'),
   visibility: z.enum(['private', 'public']),
   capturedAt: z.string().datetime().optional(),
   checksum: z.string().max(255).optional(),
@@ -34,6 +35,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const payload = parsed.data;
   const bucket = payload.visibility === 'public' ? 'public-portfolio' : 'private-originals';
   const path = `${payload.eventId}/${crypto.randomUUID()}-${sanitizeFileName(payload.filename)}`;
+  const previewPath = `${payload.eventId}/previews/${crypto.randomUUID()}.jpg`;
   const supabase = createAdminClient();
 
   const { data: asset, error: assetError } = await supabase
@@ -41,6 +43,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     .insert({
       event_id: payload.eventId,
       storage_path: path,
+      preview_path: previewPath,
+      original_filename: payload.filename,
       checksum: payload.checksum ?? null,
       captured_at: payload.capturedAt ?? null,
       visibility: payload.visibility,
@@ -53,8 +57,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return jsonError(`Unable to create asset record: ${assetError?.message ?? 'unknown'}`, 500);
   }
 
-  const { data: signed, error: signedError } = await supabase.storage.from(bucket).createSignedUploadUrl(path);
-  if (signedError || !signed) {
+  const [{ data: signed, error: signedError }, { data: previewSigned, error: previewError }] = await Promise.all([
+    supabase.storage.from(bucket).createSignedUploadUrl(path),
+    supabase.storage.from('private-previews').createSignedUploadUrl(previewPath)
+  ]);
+  if (signedError || !signed || previewError || !previewSigned) {
     await supabase.from('photo_assets').delete().eq('id', asset.id);
     return jsonError(`Unable to create signed upload URL: ${signedError?.message ?? 'unknown'}`, 500);
   }
@@ -73,6 +80,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     path,
     token: signed.token,
     signedUrl: signed.signedUrl
+    ,
+    previewSignedUrl: previewSigned.signedUrl
   });
 }
-

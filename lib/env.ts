@@ -29,7 +29,7 @@ export function getOtpMaxAttempts(): number {
 }
 
 export function getRetentionDays(): number {
-  return Number(process.env.RETENTION_DAYS ?? 90);
+  return Number(process.env.RETENTION_DAYS ?? 3);
 }
 
 export function getDownloadTtlSeconds(): number {

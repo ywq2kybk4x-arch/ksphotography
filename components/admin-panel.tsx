@@ -1,619 +1,256 @@
 'use client';
 
+import QRCode from 'qrcode';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-type UploadResponse = {
-  photoId: string;
-  signedUrl: string;
+type ActiveEvent = { id: string; title: string; location: string | null };
+type Gallery = {
+  id: string; short_code: string; status: 'draft' | 'published' | 'expired'; admin_note: string | null;
+  first_opened_at: string | null; published_at: string | null; expires_at: string | null; created_at: string;
 };
-
-type ActiveEvent = {
-  id: string;
-  title: string;
-  location: string | null;
+type Photo = {
+  id: string; title: string | null; original_filename: string | null; visibility: 'private' | 'public';
+  captured_at: string | null; created_at: string; gallery_photo_assignments: { gallery_id: string }[];
 };
-
-type OverviewGuest = {
-  id: string;
-  contact_value_masked: string;
-  created_at: string;
+type QueueItem = {
+  id: string; file: File; previewUrl: string; status: 'queued' | 'uploading' | 'uploaded' | 'failed';
+  photoId?: string; error?: string;
 };
+type CreatedGallery = { id: string; short_code: string; url: string; qr: string };
 
-type OverviewPhoto = {
-  id: string;
-  visibility: 'private' | 'public';
-  created_at: string;
-};
-
-type UploadQueueItem = {
-  localId: string;
-  file: File;
-  previewUrl: string;
-  status: 'queued' | 'uploading' | 'uploaded' | 'failed';
-  photoId?: string;
-  note?: string;
-};
-
-type StatCardProps = {
-  label: string;
-  value: string;
-  tone?: 'default' | 'ok' | 'warn';
-};
-
-function StatCard({ label, value, tone = 'default' }: StatCardProps): React.ReactElement {
-  return (
-    <article className={`admin-stat admin-stat-${tone}`}>
-      <div className="admin-stat-label">{label}</div>
-      <div className="admin-stat-value">{value}</div>
-    </article>
-  );
-}
-
-function EmptyState({
-  title,
-  description,
-  actionLabel,
-  onAction
-}: {
-  title: string;
-  description: string;
-  actionLabel?: string;
-  onAction?: () => void;
-}): React.ReactElement {
-  return (
-    <div className="admin-empty">
-      <strong>{title}</strong>
-      <p className="small">{description}</p>
-      {actionLabel && onAction && (
-        <button className="button" type="button" onClick={onAction}>
-          {actionLabel}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function SectionCard({
-  title,
-  subtitle,
-  children
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-}): React.ReactElement {
-  return (
-    <article className="admin-card elevated">
-      <div className="admin-section-head">
-        <h3>{title}</h3>
-        {subtitle && <p className="small">{subtitle}</p>}
-      </div>
-      {children}
-    </article>
+async function previewBlob(file: File): Promise<Blob> {
+  const image = await createImageBitmap(file);
+  const max = 1400;
+  const scale = Math.min(1, max / Math.max(image.width, image.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+  canvas.getContext('2d')?.drawImage(image, 0, 0, canvas.width, canvas.height);
+  image.close();
+  return await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Could not create preview')), 'image/jpeg', 0.82)
   );
 }
 
 export function AdminPanel(): React.ReactElement {
-  const [hasLoadedData, setHasLoadedData] = useState(false);
-  const [eventId, setEventId] = useState('');
+  const [activeEvent, setActiveEvent] = useState<ActiveEvent | null>(null);
   const [eventTitle, setEventTitle] = useState('');
   const [eventLocation, setEventLocation] = useState('');
-  const [visibility, setVisibility] = useState<'private' | 'public'>('private');
-  const [assignPhotoId, setAssignPhotoId] = useState('');
-  const [assignGuestId, setAssignGuestId] = useState('');
-  const [venmoUsername, setVenmoUsername] = useState('ksphotography');
+  const [galleries, setGalleries] = useState<Gallery[]>([]);
+  const [photos, setPhotos] = useState<Photo[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [selectedPhotoIds, setSelectedPhotoIds] = useState<string[]>([]);
+  const [targetGalleryId, setTargetGalleryId] = useState('');
+  const [created, setCreated] = useState<CreatedGallery | null>(null);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loadingOverview, setLoadingOverview] = useState(false);
-  const [activeEvent, setActiveEvent] = useState<ActiveEvent | null>(null);
-  const [recentGuests, setRecentGuests] = useState<OverviewGuest[]>([]);
-  const [recentPhotos, setRecentPhotos] = useState<OverviewPhoto[]>([]);
-  const [guestSearch, setGuestSearch] = useState('');
-  const [isDragActive, setIsDragActive] = useState(false);
-  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [bulkGuestId, setBulkGuestId] = useState('');
-  const [bulkPhotoIds, setBulkPhotoIds] = useState<string[]>([]);
 
-  async function postJson(path: string, body: unknown): Promise<unknown> {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const payload = (await res.json()) as { error?: string };
-    if (!res.ok) {
-      throw new Error(payload.error ?? 'Request failed');
-    }
+  async function json(path: string, options?: RequestInit): Promise<any> {
+    const response = await fetch(path, options);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error ?? 'Request failed');
     return payload;
   }
 
-  const loadOverview = useCallback(async (): Promise<void> => {
-    setLoadingOverview(true);
+  const refresh = useCallback(async () => {
+    try {
+      const payload = await json('/api/admin/overview');
+      setActiveEvent(payload.activeEvent ?? null);
+      setGalleries(payload.galleries ?? []);
+      setPhotos(payload.recentPhotos ?? []);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to load dashboard');
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  async function createEvent(event: React.FormEvent): Promise<void> {
+    event.preventDefault();
     setError(null);
     try {
-      const res = await fetch('/api/admin/overview', { method: 'GET' });
-      const payload = (await res.json()) as {
-        error?: string;
-        activeEvent?: ActiveEvent | null;
-        recentGuests?: OverviewGuest[];
-        recentPhotos?: OverviewPhoto[];
-      };
-      if (!res.ok) {
-        throw new Error(payload.error ?? 'Unable to load admin overview');
-      }
-
-      setActiveEvent(payload.activeEvent ?? null);
-      setRecentGuests(payload.recentGuests ?? []);
-      setRecentPhotos(payload.recentPhotos ?? []);
-      if (!eventId && payload.activeEvent?.id) {
-        setEventId(payload.activeEvent.id);
-      }
-      setHasLoadedData(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to load admin overview');
-    } finally {
-      setLoadingOverview(false);
-    }
-  }, [eventId]);
-
-  useEffect(() => {
-    void loadOverview();
-  }, [loadOverview]);
-
-  async function signOut(): Promise<void> {
-    await fetch('/api/admin/auth/logout', { method: 'POST' });
-    window.location.href = '/admin/login';
+      await json('/api/admin/events', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: eventTitle, location: eventLocation || undefined, isActive: true })
+      });
+      setEventTitle(''); setEventLocation(''); setMessage('Active shoot created.'); await refresh();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Unable to create shoot'); }
   }
 
-  const privateRecentPhotos = useMemo(
-    () => recentPhotos.filter((photo) => photo.visibility === 'private'),
-    [recentPhotos]
-  );
-
-  const uploadQueueCount = uploadQueue.length;
-  const dataStatus = hasLoadedData ? 'Loaded' : 'Not Loaded';
-  const uploadReadiness = eventId && uploadQueueCount > 0 ? 'Ready to upload' : 'Needs setup';
-
-  const filteredGuests = useMemo(() => {
-    const query = guestSearch.trim().toLowerCase();
-    if (!query) {
-      return recentGuests;
-    }
-    return recentGuests.filter(
-      (guest) =>
-        guest.contact_value_masked.toLowerCase().includes(query) ||
-        guest.id.toLowerCase().includes(query)
-    );
-  }, [guestSearch, recentGuests]);
+  async function createGallery(): Promise<void> {
+    if (!activeEvent) { setError('Create an active shoot first.'); return; }
+    setBusy(true); setError(null);
+    try {
+      const payload = await json('/api/admin/galleries', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventId: activeEvent.id, adminNote: note || undefined })
+      });
+      const qr = await QRCode.toDataURL(payload.url, { width: 520, margin: 2, errorCorrectionLevel: 'M' });
+      setCreated({ id: payload.gallery.id, short_code: payload.gallery.short_code, url: payload.url, qr });
+      setTargetGalleryId(payload.gallery.id); setNote(''); await refresh();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Unable to create gallery'); }
+    finally { setBusy(false); }
+  }
 
   function addFiles(files: File[]): void {
-    if (!files.length) {
-      return;
-    }
-    setUploadQueue((current) => {
-      const existing = new Set(current.map((item) => `${item.file.name}:${item.file.size}:${item.file.lastModified}`));
-      const additions = files
-        .filter((file) => file.type.startsWith('image/'))
-        .filter((file) => !existing.has(`${file.name}:${file.size}:${file.lastModified}`))
-        .map((file) => ({
-          localId: crypto.randomUUID(),
-          file,
-          previewUrl: URL.createObjectURL(file),
-          status: 'queued' as const
-        }));
-      return [...current, ...additions];
-    });
+    const valid = files.filter((file) => file.type.startsWith('image/')).slice(0, Math.max(0, 20 - queue.length));
+    setQueue((current) => [...current, ...valid.map((file) => ({
+      id: crypto.randomUUID(), file, previewUrl: URL.createObjectURL(file), status: 'queued' as const
+    }))]);
   }
 
-  function clearQueue(): void {
-    uploadQueue.forEach((item) => URL.revokeObjectURL(item.previewUrl));
-    setUploadQueue([]);
-  }
-
-  async function createEvent(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setError(null);
-    setMessage(null);
-    try {
-      const payload = (await postJson('/api/admin/events', {
-        id: eventId || undefined,
-        title: eventTitle,
-        location: eventLocation || undefined,
-        isActive: true
-      })) as { event: { id: string } };
-      setEventId(payload.event.id);
-      setMessage(`Active event saved: ${payload.event.id}`);
-      await loadOverview();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Error creating event');
-    }
-  }
-
-  async function uploadQueuedPhotos(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setError(null);
-    setMessage(null);
-
-    if (!eventId) {
-      setError('Create or load an active event first.');
-      return;
-    }
-    const pending = uploadQueue.filter((item) => item.status === 'queued' || item.status === 'failed');
-    if (!pending.length) {
-      setError('Add at least one image to the queue.');
-      return;
-    }
-
-    setUploading(true);
-    for (const item of pending) {
-      setUploadQueue((rows) =>
-        rows.map((row) => (row.localId === item.localId ? { ...row, status: 'uploading', note: undefined } : row))
-      );
-
+  async function upload(): Promise<void> {
+    if (!activeEvent) { setError('Create an active shoot first.'); return; }
+    setBusy(true); setError(null);
+    for (const item of queue.filter((row) => row.status === 'queued' || row.status === 'failed')) {
+      setQueue((rows) => rows.map((row) => row.id === item.id ? { ...row, status: 'uploading', error: undefined } : row));
       try {
-        const payload = (await postJson('/api/admin/photos/upload', {
-          eventId,
-          filename: item.file.name,
-          contentType: item.file.type || 'image/jpeg',
-          visibility,
-          title: item.file.name.replace(/\.[^.]+$/, '')
-        })) as UploadResponse;
-
-        const uploadRes = await fetch(payload.signedUrl, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': item.file.type || 'application/octet-stream',
-            'x-upsert': 'false'
-          },
-          body: item.file
+        const signed = await json('/api/admin/photos/upload', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            eventId: activeEvent.id, filename: item.file.name, contentType: item.file.type || 'image/jpeg',
+            previewContentType: 'image/jpeg', visibility: 'private',
+            title: item.file.name.replace(/\.[^.]+$/, ''), capturedAt: new Date(item.file.lastModified).toISOString()
+          })
         });
-        if (!uploadRes.ok) {
-          throw new Error('Signed upload failed');
-        }
-
-        let note = 'Uploaded';
-        if (visibility === 'private' && assignGuestId) {
-          await postJson('/api/admin/assignments', {
-            photoId: payload.photoId,
-            guestId: assignGuestId,
-            action: 'assign'
-          });
-          note = 'Uploaded + assigned';
-        }
-
-        setAssignPhotoId(payload.photoId);
-        setUploadQueue((rows) =>
-          rows.map((row) =>
-            row.localId === item.localId ? { ...row, status: 'uploaded', photoId: payload.photoId, note } : row
-          )
-        );
-      } catch (err) {
-        setUploadQueue((rows) =>
-          rows.map((row) =>
-            row.localId === item.localId
-              ? { ...row, status: 'failed', note: err instanceof Error ? err.message : 'Upload failed' }
-              : row
-          )
-        );
+        const preview = await previewBlob(item.file);
+        const [originalResponse, previewResponse] = await Promise.all([
+          fetch(signed.signedUrl, { method: 'PUT', headers: { 'Content-Type': item.file.type || 'application/octet-stream', 'x-upsert': 'false' }, body: item.file }),
+          fetch(signed.previewSignedUrl, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', 'x-upsert': 'false' }, body: preview })
+        ]);
+        if (!originalResponse.ok || !previewResponse.ok) throw new Error('Storage upload failed');
+        setQueue((rows) => rows.map((row) => row.id === item.id ? { ...row, status: 'uploaded', photoId: signed.photoId } : row));
+      } catch (caught) {
+        setQueue((rows) => rows.map((row) => row.id === item.id ? { ...row, status: 'failed', error: caught instanceof Error ? caught.message : 'Upload failed' } : row));
       }
     }
-    setUploading(false);
-    setMessage('Upload complete. Review statuses below.');
-    await loadOverview();
+    setBusy(false); setMessage('Upload finished. Select the portraits below and assign them to the matching code.'); await refresh();
   }
 
-  async function assignPhoto(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setError(null);
-    setMessage(null);
+  async function assign(): Promise<void> {
+    if (!targetGalleryId || !selectedPhotoIds.length) { setError('Choose a draft gallery and at least one portrait.'); return; }
+    setBusy(true); setError(null);
     try {
-      await postJson('/api/admin/assignments', {
-        photoId: assignPhotoId,
-        guestId: assignGuestId,
-        action: 'assign'
+      await json('/api/admin/gallery-assignments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ galleryId: targetGalleryId, photoIds: selectedPhotoIds, action: 'assign' })
       });
-      setMessage('Photo assignment saved.');
-      await loadOverview();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Assignment failed');
-    }
+      setSelectedPhotoIds([]); setMessage('Photos assigned. Review the gallery, then publish it.'); await refresh();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Assignment failed'); }
+    finally { setBusy(false); }
   }
 
-  async function assignSelectedPhotos(): Promise<void> {
-    setError(null);
-    setMessage(null);
-    if (!bulkGuestId || !bulkPhotoIds.length) {
-      setError('Select a guest and at least one photo.');
-      return;
-    }
-
+  async function publish(gallery: Gallery): Promise<void> {
+    if (!window.confirm(`Publish gallery ${gallery.short_code}? Its three-day download window starts now.`)) return;
+    setBusy(true); setError(null);
     try {
-      for (const photoId of bulkPhotoIds) {
-        await postJson('/api/admin/assignments', { photoId, guestId: bulkGuestId, action: 'assign' });
-      }
-      setMessage(`Assigned ${bulkPhotoIds.length} photo(s).`);
-      setBulkPhotoIds([]);
-      await loadOverview();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Bulk assignment failed');
-    }
+      await json(`/api/admin/galleries/${gallery.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'publish' })
+      });
+      setMessage(`Gallery ${gallery.short_code} is live for three days.`); await refresh();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Publish failed'); }
+    finally { setBusy(false); }
   }
 
-  async function saveTipConfig(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setError(null);
-    setMessage(null);
+  async function regenerate(gallery: Gallery): Promise<void> {
+    if (!window.confirm(`Replace the private link for ${gallery.short_code}? The old QR will stop working.`)) return;
     try {
-      await postJson('/api/admin/tip-config', { venmoUsername });
-      setMessage('Tip settings updated.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Tip config failed');
-    }
+      const payload = await json(`/api/admin/galleries/${gallery.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'regenerate' })
+      });
+      const qr = await QRCode.toDataURL(payload.url, { width: 520, margin: 2 });
+      setCreated({ id: gallery.id, short_code: gallery.short_code, url: payload.url, qr });
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Could not replace link'); }
   }
 
-  function toggleBulkPhoto(photoId: string): void {
-    setBulkPhotoIds((current) => (current.includes(photoId) ? current.filter((id) => id !== photoId) : [...current, photoId]));
+  const draftGalleries = galleries.filter((gallery) => gallery.status === 'draft');
+  const selectedGallery = useMemo(() => galleries.find((gallery) => gallery.id === targetGalleryId), [galleries, targetGalleryId]);
+
+  if (created) {
+    return (
+      <section className="phone-handoff">
+        <button className="button" onClick={() => setCreated(null)}>← Back to dashboard</button>
+        <div className="handoff-card">
+          <span className="eyebrow">Private gallery ready</span>
+          <div className="marker-code">{created.short_code}</div>
+          <p>1. Let the guests scan this QR.<br />2. Photograph this screen with your camera as the group’s final frame.</p>
+          <img className="qr-image" src={created.qr} alt={`QR code for gallery ${created.short_code}`} />
+          <div className="handoff-actions">
+            <button className="button primary" onClick={() => void navigator.clipboard.writeText(created.url)}>Copy private link</button>
+            <a className="button" href={created.url} target="_blank" rel="noreferrer">Test guest view</a>
+          </div>
+          <p className="scan-status">{galleries.find((row) => row.id === created.id)?.first_opened_at ? '✓ Guest connected' : 'Waiting for guest to scan…'}</p>
+          <button className="button" onClick={() => void refresh()}>Check scan</button>
+        </div>
+      </section>
+    );
   }
 
   return (
-    <div className="admin-shell">
+    <div className="delivery-admin">
       <section className="admin-top">
-        <div className="admin-title-wrap">
-          <h2>Studio Control Center</h2>
-          <p>Run your whole client-delivery workflow here: event setup, drag-drop uploads, and secure assignments.</p>
-        </div>
-        <div className="admin-stats-grid">
-          <StatCard
-            label="Active Event"
-            value={activeEvent ? activeEvent.title : 'None'}
-            tone={activeEvent ? 'ok' : 'warn'}
-          />
-          <StatCard label="Guest Count" value={String(recentGuests.length)} />
-          <StatCard label="Recent Photos" value={String(recentPhotos.length)} />
-          <StatCard label="Upload Queue" value={String(uploadQueueCount)} />
-          <StatCard label="Admin Data" value={dataStatus} tone={hasLoadedData ? 'ok' : 'warn'} />
-          <StatCard label="Upload Status" value={uploadReadiness} tone={uploadReadiness === 'Ready to upload' ? 'ok' : 'warn'} />
-        </div>
+        <div><span className="eyebrow">Contact-free delivery</span><h1>Photo handoff</h1><p>Create the QR on your phone. Upload, match, and publish from your computer.</p></div>
+        <button className="button" onClick={() => void fetch('/api/admin/auth/logout', { method: 'POST' }).then(() => location.href = '/admin/login')}>Sign out</button>
       </section>
 
-      <section className="admin-grid">
-        <div className="admin-main">
-          <SectionCard
-            title="Event Management"
-            subtitle="Create a new active event or switch to another event. Active event controls where new uploads go."
-          >
-            {!activeEvent ? (
-              <EmptyState
-                title="No active event set"
-                description="Create one now so uploads and guest claims are tied to the right trip/session."
-              />
-            ) : (
-              <div className="admin-inline-banner">
-                <div>
-                  <strong>{activeEvent.title}</strong>
-                  <div className="small">
-                    {activeEvent.location ? `${activeEvent.location} • ` : ''}Event ID: {activeEvent.id}
-                  </div>
-                </div>
-                <span className="status-chip">Active</span>
-              </div>
-            )}
-            <form className="stack" onSubmit={createEvent}>
-              <input placeholder="Event title" value={eventTitle} onChange={(e) => setEventTitle(e.target.value)} required />
-              <input placeholder="Location (optional)" value={eventLocation} onChange={(e) => setEventLocation(e.target.value)} />
-              <button className="button primary" type="submit">
-                Save Active Event
-              </button>
-            </form>
-          </SectionCard>
-
-          <SectionCard
-            title="Upload Photos"
-            subtitle="Drag and drop images as your primary flow. This is the fastest way to deliver galleries."
-          >
-            <div className="admin-toolbar">
-              <button className="button" type="button" onClick={() => (window.location.href = 'photos://')}>
-                Open Apple Photos
-              </button>
-              <label className="button upload-select">
-                Choose Images
-                <input hidden multiple type="file" accept="image/*" onChange={(e) => addFiles(Array.from(e.target.files ?? []))} />
+      {!activeEvent ? (
+        <form className="admin-card stack" onSubmit={createEvent}>
+          <h2>Start a shoot</h2><p className="small">A shoot keeps today’s galleries and uploads together.</p>
+          <input required placeholder="Shoot name (e.g. Rome · July 27)" value={eventTitle} onChange={(event) => setEventTitle(event.target.value)} />
+          <input placeholder="Location (optional)" value={eventLocation} onChange={(event) => setEventLocation(event.target.value)} />
+          <button className="button primary">Create active shoot</button>
+        </form>
+      ) : (
+        <>
+          <div className="active-shoot"><span><strong>{activeEvent.title}</strong>{activeEvent.location ? ` · ${activeEvent.location}` : ''}</span><span className="status-chip">Active shoot</span></div>
+          <section className="workflow-grid">
+            <article className="admin-card new-gallery-card">
+              <span className="step-number">1</span><h2>New guest gallery</h2><p>Create this immediately after taking a group’s portraits.</p>
+              <input placeholder="Private note (optional)" value={note} onChange={(event) => setNote(event.target.value)} />
+              <button className="button primary large-button" disabled={busy} onClick={() => void createGallery()}>Show new QR code</button>
+            </article>
+            <article className="admin-card">
+              <span className="step-number">2</span><h2>Upload from SD card</h2><p>Choose up to 20 portraits. Do not select the marker-code photo.</p>
+              <label className="dropzone">
+                <strong>Choose or drop photos</strong><span>{queue.length ? `${queue.length} selected` : 'JPEG, PNG, HEIC if supported by this browser'}</span>
+                <input hidden type="file" accept="image/*" multiple onChange={(event) => addFiles(Array.from(event.target.files ?? []))} />
               </label>
-            </div>
-            <form className="stack" onSubmit={uploadQueuedPhotos}>
-              <div className="admin-row-two">
-                <input placeholder="Event ID" value={eventId} onChange={(e) => setEventId(e.target.value)} required />
-                <select value={visibility} onChange={(e) => setVisibility(e.target.value as 'private' | 'public')}>
-                  <option value="private">Private delivery photo</option>
-                  <option value="public">Public portfolio photo</option>
-                </select>
-              </div>
-              <label>
-                Auto-assign guest (optional)
-                <select value={assignGuestId} onChange={(e) => setAssignGuestId(e.target.value)}>
-                  <option value="">No auto-assignment</option>
-                  {recentGuests.map((guest) => (
-                    <option key={guest.id} value={guest.id}>
-                      {guest.contact_value_masked} ({guest.id.slice(0, 8)}...)
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div
-                className={`dropzone dropzone-large${isDragActive ? ' active' : ''}`}
-                onDragEnter={(e) => {
-                  e.preventDefault();
-                  setIsDragActive(true);
-                }}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setIsDragActive(true);
-                }}
-                onDragLeave={(e) => {
-                  e.preventDefault();
-                  setIsDragActive(false);
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setIsDragActive(false);
-                  addFiles(Array.from(e.dataTransfer.files ?? []));
-                }}
-              >
-                <strong>Drop photos here</strong>
-                <p className="small">
-                  {uploadQueueCount
-                    ? `${uploadQueueCount} file(s) in queue`
-                    : 'No files in queue. Drop images here or click "Choose Images".'}
-                </p>
-              </div>
+              <div className="upload-gallery">{queue.map((item) => <div className="upload-thumb" key={item.id}><img src={item.previewUrl} alt="" /><span className={`status-pill ${item.status}`}>{item.status}</span>{item.error && <small>{item.error}</small>}</div>)}</div>
+              <button className="button primary" disabled={busy || !queue.length} onClick={() => void upload()}>{busy ? 'Working…' : 'Upload photos'}</button>
+            </article>
+          </section>
 
-              <div className="upload-gallery">
-                {!uploadQueue.length && (
-                  <EmptyState
-                    title="Queue is empty"
-                    description="Add photos to queue, confirm event ID, then click Upload Queue."
-                  />
-                )}
-                {uploadQueue.map((item) => (
-                  <div className="upload-thumb" key={item.localId}>
-                    <img src={item.previewUrl} alt={item.file.name} />
-                    <div className="upload-meta">
-                      <strong>{item.file.name}</strong>
-                      <span className={`status-pill ${item.status}`}>
-                        {item.status === 'queued' && 'Queued'}
-                        {item.status === 'uploading' && 'Uploading'}
-                        {item.status === 'uploaded' && 'Uploaded'}
-                        {item.status === 'failed' && 'Failed'}
-                      </span>
-                      {item.note && <p className="small">{item.note}</p>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="admin-toolbar">
-                <button className="button primary" type="submit" disabled={uploading || !uploadQueue.length}>
-                  {uploading ? 'Uploading...' : 'Upload Queue'}
-                </button>
-                <button className="button subtle-danger" type="button" onClick={clearQueue} disabled={uploading || !uploadQueue.length}>
-                  Clear Queue
-                </button>
-              </div>
-            </form>
-          </SectionCard>
-
-          <SectionCard
-            title="Bulk Assign Private Photos"
-            subtitle="Advanced: select multiple uploaded private photos and assign all to one guest."
-          >
-            <label>
-              Target guest
-              <select value={bulkGuestId} onChange={(e) => setBulkGuestId(e.target.value)}>
-                <option value="">Select guest...</option>
-                {recentGuests.map((guest) => (
-                  <option key={guest.id} value={guest.id}>
-                    {guest.contact_value_masked}
-                  </option>
-                ))}
+          <section className="admin-card">
+            <span className="step-number">3</span><h2>Match portraits to the marker code</h2>
+            <div className="assignment-bar">
+              <select value={targetGalleryId} onChange={(event) => setTargetGalleryId(event.target.value)}>
+                <option value="">Choose draft gallery…</option>
+                {draftGalleries.map((gallery) => <option key={gallery.id} value={gallery.id}>{gallery.short_code}{gallery.admin_note ? ` · ${gallery.admin_note}` : ''}</option>)}
               </select>
-            </label>
-            <div className="bulk-list">
-              {!privateRecentPhotos.length ? (
-                <EmptyState title="No private photos yet" description="Upload private photos first, then bulk assign." />
-              ) : (
-                privateRecentPhotos.map((photo) => (
-                  <label key={photo.id} className="bulk-row">
-                    <input type="checkbox" checked={bulkPhotoIds.includes(photo.id)} onChange={() => toggleBulkPhoto(photo.id)} />
-                    <span>{photo.id}</span>
-                  </label>
-                ))
-              )}
+              <span>{selectedPhotoIds.length} selected</span>
+              <button className="button primary" disabled={busy || !targetGalleryId || !selectedPhotoIds.length} onClick={() => void assign()}>Assign to {selectedGallery?.short_code ?? 'gallery'}</button>
             </div>
-            <button className="button primary" type="button" onClick={() => void assignSelectedPhotos()}>
-              Assign Selected Photos
-            </button>
-          </SectionCard>
-
-          <SectionCard
-            title="Single Photo Assignment"
-            subtitle="Use this when you need a one-off correction or manual reassignment."
-          >
-            <form className="stack" onSubmit={assignPhoto}>
-              <input placeholder="Photo ID" value={assignPhotoId} onChange={(e) => setAssignPhotoId(e.target.value)} required />
-              <input placeholder="Guest ID" value={assignGuestId} onChange={(e) => setAssignGuestId(e.target.value)} required />
-              <button className="button primary" type="submit">
-                Assign Photo
-              </button>
-            </form>
-          </SectionCard>
-        </div>
-
-        <aside className="admin-side">
-          <SectionCard title="Admin Session" subtitle="You are authenticated. Refresh data or sign out here.">
-            <button className="button" type="button" onClick={() => void loadOverview()} disabled={loadingOverview}>
-              {loadingOverview ? 'Refreshing...' : 'Refresh Dashboard Data'}
-            </button>
-            <button className="button subtle-danger" type="button" onClick={() => void signOut()}>
-              Sign Out
-            </button>
-          </SectionCard>
-
-          <SectionCard title="Venmo Settings" subtitle="Set the username used in public and private tip prompts.">
-            <form className="stack" onSubmit={saveTipConfig}>
-              <input value={venmoUsername} onChange={(e) => setVenmoUsername(e.target.value)} required />
-              <button className="button primary" type="submit">
-                Save Venmo Settings
-              </button>
-            </form>
-          </SectionCard>
-
-          <SectionCard title="Guests" subtitle="Search and quickly pick a guest for assignments.">
-            <input
-              placeholder="Search by masked email or guest id..."
-              value={guestSearch}
-              onChange={(e) => setGuestSearch(e.target.value)}
-            />
-            <div className="quick-list">
-              {!filteredGuests.length ? (
-                <EmptyState
-                  title="No matching guests"
-                  description={recentGuests.length ? 'Try a different search.' : 'Guests appear after claims are submitted.'}
-                />
-              ) : (
-                filteredGuests.map((guest) => (
-                  <div key={guest.id} className="quick-item">
-                    <div>
-                      <strong>{guest.contact_value_masked}</strong>
-                      <div className="small">{new Date(guest.created_at).toLocaleString()}</div>
-                      <div className="small">{guest.id}</div>
-                    </div>
-                    <button className="button" type="button" onClick={() => setAssignGuestId(guest.id)}>
-                      Use Guest
-                    </button>
-                  </div>
-                ))
-              )}
+            <div className="admin-photo-grid">
+              {photos.filter((photo) => photo.visibility === 'private').map((photo) => {
+                const assigned = photo.gallery_photo_assignments?.[0]?.gallery_id;
+                const selected = selectedPhotoIds.includes(photo.id);
+                return <button type="button" className={`admin-photo-choice${selected ? ' selected' : ''}`} key={photo.id} disabled={Boolean(assigned)} onClick={() => setSelectedPhotoIds((ids) => ids.includes(photo.id) ? ids.filter((id) => id !== photo.id) : [...ids, photo.id])}><img src={`/api/admin/photos/${photo.id}/preview`} alt={photo.title ?? 'Uploaded portrait'} /><span>{assigned ? `Assigned to ${galleries.find((g) => g.id === assigned)?.short_code ?? 'gallery'}` : selected ? '✓ Selected' : photo.original_filename}</span></button>;
+              })}
             </div>
-          </SectionCard>
+          </section>
 
-          <SectionCard title="Quick Actions">
-            <div className="quick-action-list">
-              <button className="button" type="button" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
-                Back to Top
-              </button>
-              <button className="button" type="button" onClick={() => setEventTitle('')}>
-                Clear Event Title
-              </button>
-              <button className="button" type="button" onClick={() => setGuestSearch('')}>
-                Clear Guest Search
-              </button>
-            </div>
-          </SectionCard>
-        </aside>
-      </section>
-
-      {message && <div className="status">{message}</div>}
-      {error && <div className="error">{error}</div>}
+          <section className="admin-card">
+            <span className="step-number">4</span><h2>Review and publish</h2>
+            <div className="gallery-list">{galleries.map((gallery) => {
+              const count = photos.filter((photo) => photo.gallery_photo_assignments?.some((assignment) => assignment.gallery_id === gallery.id)).length;
+              return <article className="gallery-row" key={gallery.id}><div><strong className="gallery-code">{gallery.short_code}</strong><span className={`status-pill ${gallery.status}`}>{gallery.status}</span><p className="small">{gallery.admin_note || 'No private note'} · {count} photo{count === 1 ? '' : 's'}{gallery.first_opened_at ? ' · Guest connected' : ''}</p>{gallery.expires_at && <p className="small">Expires {new Date(gallery.expires_at).toLocaleString()}</p>}</div><div className="actions">{gallery.status === 'draft' && <button className="button primary" disabled={busy || count === 0} onClick={() => void publish(gallery)}>Publish</button>}<button className="button" onClick={() => void regenerate(gallery)}>Replace link</button></div></article>;
+            })}</div>
+          </section>
+        </>
+      )}
+      {message && <div className="toast status">{message}</div>}{error && <div className="toast error">{error}</div>}
     </div>
   );
 }

@@ -10,7 +10,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const supabase = createAdminClient();
 
-  const [{ data: activeEvent, error: eventError }, { data: recentGuests, error: guestError }, { data: recentPhotos, error: photoError }] =
+  const [{ data: activeEvent, error: eventError }, { data: recentGalleries, error: galleryError }, { data: recentPhotos, error: photoError }] =
     await Promise.all([
       supabase
         .from('events')
@@ -20,29 +20,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         .limit(1)
         .maybeSingle(),
       supabase
-        .from('guests')
-        .select('id, contact_value_masked, created_at, event_id')
+        .from('delivery_galleries')
+        .select('id, short_code, status, admin_note, first_opened_at, published_at, expires_at, created_at, event_id')
         .order('created_at', { ascending: false })
-        .limit(10),
+        .limit(100),
       supabase
         .from('photo_assets')
-        .select('id, visibility, created_at, event_id')
+        .select('id, title, original_filename, visibility, captured_at, created_at, event_id, gallery_photo_assignments(gallery_id)')
         .is('deleted_at', null)
         .order('created_at', { ascending: false })
-        .limit(10)
+        .limit(100)
     ]);
 
-  if (eventError || guestError || photoError) {
+  if (eventError || galleryError || photoError) {
     return jsonError(
-      `Unable to load admin overview: ${eventError?.message ?? guestError?.message ?? photoError?.message ?? 'unknown'}`,
+      `Unable to load admin overview: ${eventError?.message ?? galleryError?.message ?? photoError?.message ?? 'unknown'}`,
       500
     );
   }
 
   return NextResponse.json({
     activeEvent: activeEvent ?? null,
-    recentGuests: recentGuests ?? [],
+    galleries: recentGalleries ?? [],
     recentPhotos: recentPhotos ?? []
   });
 }
-

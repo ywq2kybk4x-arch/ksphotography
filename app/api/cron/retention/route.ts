@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase';
-import { getRetentionDays } from '@/lib/env';
 import { jsonError } from '@/lib/http';
 import { writeAuditLog } from '@/lib/audit';
 
@@ -11,29 +10,39 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return jsonError('Unauthorized', 401);
   }
 
-  const cutoff = new Date(Date.now() - getRetentionDays() * 24 * 60 * 60 * 1000).toISOString();
+  const now = new Date().toISOString();
   const supabase = createAdminClient();
 
-  const { data: expiredAssets, error: findError } = await supabase
-    .from('photo_assets')
-    .select('id, storage_path')
-    .eq('visibility', 'private')
-    .is('deleted_at', null)
-    .lt('created_at', cutoff);
+  const { data: expiredGalleries, error: galleryError } = await supabase
+    .from('delivery_galleries')
+    .select('id')
+    .eq('status', 'published')
+    .lte('expires_at', now);
+  if (galleryError) return jsonError(`Unable to query expired galleries: ${galleryError.message}`, 500);
+  const galleryIds = (expiredGalleries ?? []).map((row) => row.id);
+  if (!galleryIds.length) return NextResponse.json({ deleted: 0, galleriesExpired: 0 });
+
+  const { data: assignments, error: assignmentError } = await supabase
+    .from('gallery_photo_assignments')
+    .select('photo_id')
+    .in('gallery_id', galleryIds);
+  if (assignmentError) return jsonError(`Unable to query gallery photos: ${assignmentError.message}`, 500);
+  const ids = (assignments ?? []).map((row) => row.photo_id);
+
+  const { data: expiredAssets, error: findError } = ids.length
+    ? await supabase.from('photo_assets').select('id, storage_path, preview_path').in('id', ids).is('deleted_at', null)
+    : { data: [], error: null };
 
   if (findError) {
     return jsonError(`Unable to query retention assets: ${findError.message}`, 500);
   }
 
-  const ids = (expiredAssets ?? []).map((row) => row.id);
-  if (ids.length === 0) {
-    return NextResponse.json({ deleted: 0 });
-  }
-
   const paths = (expiredAssets ?? []).map((row) => row.storage_path);
-  await supabase.storage.from('private-originals').remove(paths);
-  await supabase.from('photo_assignments').delete().in('photo_id', ids);
-  await supabase.from('photo_assets').update({ deleted_at: new Date().toISOString() }).in('id', ids);
+  const previewPaths = (expiredAssets ?? []).map((row) => row.preview_path).filter(Boolean);
+  if (paths.length) await supabase.storage.from('private-originals').remove(paths);
+  if (previewPaths.length) await supabase.storage.from('private-previews').remove(previewPaths);
+  if (ids.length) await supabase.from('photo_assets').update({ deleted_at: now }).in('id', ids);
+  await supabase.from('delivery_galleries').update({ status: 'expired' }).in('id', galleryIds);
 
   await writeAuditLog({
     actorType: 'system',
@@ -42,6 +51,5 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     metadata: { deletedCount: ids.length }
   });
 
-  return NextResponse.json({ deleted: ids.length });
+  return NextResponse.json({ deleted: ids.length, galleriesExpired: galleryIds.length });
 }
-
